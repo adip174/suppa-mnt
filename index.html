@@ -68,8 +68,22 @@
                     const result = await response.json();
                     
                     if (result.status === 'success') {
-                        setEngines(result.data);
-                        if(result.data.length > 0 && !setupSelectedId) setSetupSelectedId(result.data[0].id);
+                        // Tambahkan history mock jika backend belum mengirimkan data history
+                        const enhancedData = result.data.map(eng => {
+                            if (!eng.history) {
+                                eng.history = Array.from({length: 7}, (_, i) => {
+                                    const d = new Date();
+                                    d.setDate(d.getDate() - (6 - i));
+                                    return {
+                                        date: d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }),
+                                        runHours: Math.max(0, Math.min(24, eng.avgDailyRH + (Math.random() * 2 - 1))) // Variasi acak dari rata-rata
+                                    };
+                                });
+                            }
+                            return eng;
+                        });
+                        setEngines(enhancedData);
+                        if(enhancedData.length > 0 && !setupSelectedId) setSetupSelectedId(enhancedData[0].id);
                     } else {
                         console.error("Gagal mengambil data dari GAS:", result.message);
                         alert("Gagal mengambil data dari Database Sheets.");
@@ -202,8 +216,22 @@
                     const result = await response.json();
                     
                     if(result.status === 'success'){
-                        // Update state secara lokal (termasuk avgDailyRH baru)
-                        setEngines(prev => prev.map(eng => eng.id === engId ? { ...eng, currentRH: newRH, avgDailyRH: newAvgDailyRH } : eng));
+                        // Update state secara lokal (termasuk avgDailyRH baru dan history chart)
+                        setEngines(prev => prev.map(eng => {
+                            if (eng.id === engId) {
+                                const newHistory = [...(eng.history || [])];
+                                if (newHistory.length >= 7) newHistory.shift(); // Hapus data terlama
+                                
+                                const todayDate = inputDate ? new Date(inputDate) : new Date();
+                                newHistory.push({
+                                    date: todayDate.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }),
+                                    runHours: dailyRun
+                                });
+
+                                return { ...eng, currentRH: newRH, avgDailyRH: newAvgDailyRH, history: newHistory };
+                            }
+                            return eng;
+                        }));
                         setShowInputModal(false);
                     } else {
                         alert("Gagal menyimpan data: " + result.message);
@@ -420,6 +448,30 @@
                                                 </div>
                                             )
                                         })}
+
+                                        {/* Grafik Jam Operasi (7 Hari Terakhir) */}
+                                        <div className="mt-6 pt-5 border-t border-slate-100">
+                                            <h4 className="text-xs font-bold text-slate-700 mb-3 flex items-center">
+                                                <i className="fas fa-chart-bar mr-2 text-blue-500"></i> Jam Operasi Harian (7 Hari)
+                                            </h4>
+                                            <div className="flex gap-3 overflow-x-auto pb-2 custom-scrollbar snap-x">
+                                                {engine.history && engine.history.map((day, idx) => {
+                                                    const heightPct = Math.min(100, (day.runHours / 24) * 100);
+                                                    return (
+                                                        <div key={idx} className="flex flex-col items-center flex-shrink-0 w-10 snap-end">
+                                                            <span className="text-[10px] text-slate-600 font-bold mb-1">{day.runHours.toFixed(1)}</span>
+                                                            <div className="h-16 w-full bg-slate-100 rounded-t-md relative flex items-end overflow-hidden group">
+                                                                <div 
+                                                                    className="w-full bg-blue-500 hover:bg-blue-600 rounded-t-md transition-all duration-500" 
+                                                                    style={{ height: `${heightPct}%` }}
+                                                                ></div>
+                                                            </div>
+                                                            <span className="text-[9px] text-slate-500 mt-1 whitespace-nowrap">{day.date}</span>
+                                                        </div>
+                                                    )
+                                                })}
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             ))}
