@@ -27,7 +27,6 @@
         // ==========================================
         // KONFIGURASI API (WAJIB DIISI)
         // ==========================================
-        // Ganti string di bawah ini dengan URL Web App dari Google Apps Script Anda!
         const GAS_URL = "https://script.google.com/macros/s/AKfycbxEsVHunFmbzM6JEdHdBwwmRx8m69c0AVGvTtou3OCsAvW5_8NjQh1pKfiEOp-JiybtTA/exec"; 
 
         function App() {
@@ -35,7 +34,7 @@
             const [isLoadingData, setIsLoadingData] = useState(true);
             const [isSaving, setIsSaving] = useState(false);
 
-            const [mode, setMode] = useState('actual'); // 'actual' | 'simulation'
+            const [mode, setMode] = useState('actual'); 
             const [globalCF, setGlobalCF] = useState(80);
             const [useGlobalCF, setUseGlobalCF] = useState(true);
             
@@ -51,6 +50,13 @@
             const [setupSelectedId, setSetupSelectedId] = useState(1);
             
             const setupEngineData = useMemo(() => engines.find(e => e.id === setupSelectedId), [engines, setupSelectedId]);
+
+            // Default Tanggal Kemarin (H-1) untuk Form Input
+            const defaultDateStr = useMemo(() => {
+                const d = new Date();
+                d.setDate(d.getDate() - 1);
+                return d.toISOString().split('T')[0];
+            }, []);
 
             // ==========================================
             // FETCH DATA DARI GOOGLE APPS SCRIPT
@@ -68,18 +74,23 @@
                     const result = await response.json();
                     
                     if (result.status === 'success') {
-                        // Tambahkan history mock jika backend belum mengirimkan data history
+                        // Memaksa struktur grafik selalu 7 hari yang lalu sampai kemarin
                         const enhancedData = result.data.map(eng => {
-                            if (!eng.history) {
-                                eng.history = Array.from({length: 7}, (_, i) => {
-                                    const d = new Date();
-                                    d.setDate(d.getDate() - (6 - i));
-                                    return {
-                                        date: d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }),
-                                        runHours: Math.max(0, Math.min(24, eng.avgDailyRH + (Math.random() * 2 - 1))) // Variasi acak dari rata-rata
-                                    };
-                                });
-                            }
+                            const fixedHistory = Array.from({length: 7}, (_, i) => {
+                                const d = new Date();
+                                d.setDate(d.getDate() - (7 - i)); // i=6 adalah Kemarin
+                                const dateStr = d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+                                
+                                // Cocokkan jika backend mengirim data di tanggal ini
+                                const existingLog = (eng.history || []).find(h => h.date === dateStr);
+                                
+                                return {
+                                    date: dateStr,
+                                    runHours: existingLog ? existingLog.runHours : 0 
+                                };
+                            });
+                            
+                            eng.history = fixedHistory;
                             return eng;
                         });
                         setEngines(enhancedData);
@@ -181,22 +192,65 @@
             const handleInputRH = async (e) => {
                 e.preventDefault();
                 const formData = new FormData(e.target);
-                const engId = parseInt(formData.get('engineId'));
-                const newRH = parseFloat(formData.get('newRH'));
                 const inputDate = formData.get('inputDate');
-                const targetEngine = engines.find(eng => eng.id === engId);
+                
+                const batchPayload = [];
+                const localUpdates = [];
 
-                // Hitung jam operasi hari ini (Daily Run)
-                const dailyRun = newRH - targetEngine.currentRH;
+                // Loop melalui semua engine untuk mengecek isian form
+                for (const targetEngine of engines) {
+                    const newRHRaw = formData.get(`rh_${targetEngine.id}`);
+                    
+                    let newRH = targetEngine.currentRH; // Default: Gunakan RH terakhir
+                    let dailyRun = 0; // Default: 0 jam operasi
 
-                if (dailyRun <= 0) return alert("Error: RH Baru harus lebih besar dari RH saat ini!");
-                if (dailyRun > 24) return alert("Error: Kenaikan RH maksimal 24 jam/hari!");
+                    // Jika input form diisi (mesin jalan), hitung selisihnya
+                    if (newRHRaw) {
+                        newRH = parseFloat(newRHRaw);
+                        dailyRun = newRH - targetEngine.currentRH;
+                    }
 
-                // Kalkulasi Moving Average Baru (Aproksimasi 7 Hari)
-                // Rumus: ((Rata-rata lama * 6) + Jam Operasi Hari ini) / 7
-                const newAvgDailyRH = targetEngine.avgDailyRH > 0 
-                    ? ((targetEngine.avgDailyRH * 6) + dailyRun) / 7 
-                    : dailyRun;
+                    if (dailyRun < 0) return alert(`Error pada ${targetEngine.name}: RH Baru tidak boleh lebih kecil dari RH saat ini!`);
+                    if (dailyRun > 24) return alert(`Error pada ${targetEngine.name}: Kenaikan RH maksimal 24 jam/hari! (Tercatat selisih: ${dailyRun.toFixed(1)} jam)`);
+
+                    // 1. Update Array History Lokal Sementara
+                    const newHistory = [...(targetEngine.history || [])];
+                    const inputDateObj = inputDate ? new Date(inputDate) : new Date();
+                    const dateStr = inputDateObj.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+                    
+                    const existingIdx = newHistory.findIndex(h => h.date === dateStr);
+                    if (existingIdx >= 0) {
+                        newHistory[existingIdx] = { date: dateStr, runHours: dailyRun };
+                    } else {
+                        if (newHistory.length >= 7) newHistory.shift();
+                        newHistory.push({ date: dateStr, runHours: dailyRun });
+                    }
+
+                    // 2. Kalkulasi Rata-rata Operasi (Avg Run) murni (Abaikan hari yang 0 jam agar rata-rata tidak rusak)
+                    const activeDays = newHistory.filter(h => h.runHours > 0);
+                    const newAvgDailyRH = activeDays.length > 0 
+                        ? activeDays.reduce((sum, h) => sum + h.runHours, 0) / activeDays.length 
+                        : 0;
+
+                    // Masukkan ke keranjang pengiriman (payload)
+                    batchPayload.push({
+                        engineName: targetEngine.name,
+                        newRH: newRH,
+                        avgDailyRH: newAvgDailyRH
+                    });
+
+                    // Siapkan update untuk state lokal
+                    localUpdates.push({
+                        id: targetEngine.id,
+                        newRH: newRH,
+                        avgDailyRH: newAvgDailyRH,
+                        history: newHistory
+                    });
+                }
+
+                if (batchPayload.length === 0) {
+                    return alert("Terjadi kesalahan, data tidak dapat diproses.");
+                }
 
                 setIsSaving(true);
                 
@@ -204,31 +258,21 @@
                     const response = await fetch(GAS_URL, {
                         method: 'POST',
                         body: JSON.stringify({
-                            action: 'inputRH',
+                            action: 'inputRHBatch',
                             payload: { 
-                                engineName: targetEngine.name, 
-                                newRH: newRH, 
                                 date: inputDate,
-                                avgDailyRH: newAvgDailyRH // Mengirim rata-rata baru ke backend
+                                data: batchPayload // Mengirim array of engines
                             }
                         })
                     });
                     const result = await response.json();
                     
                     if(result.status === 'success'){
-                        // Update state secara lokal (termasuk avgDailyRH baru dan history chart)
+                        // Update state secara lokal berdasarkan update keranjang
                         setEngines(prev => prev.map(eng => {
-                            if (eng.id === engId) {
-                                const newHistory = [...(eng.history || [])];
-                                if (newHistory.length >= 7) newHistory.shift(); // Hapus data terlama
-                                
-                                const todayDate = inputDate ? new Date(inputDate) : new Date();
-                                newHistory.push({
-                                    date: todayDate.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }),
-                                    runHours: dailyRun
-                                });
-
-                                return { ...eng, currentRH: newRH, avgDailyRH: newAvgDailyRH, history: newHistory };
+                            const update = localUpdates.find(u => u.id === eng.id);
+                            if (update) {
+                                return { ...eng, currentRH: update.newRH, avgDailyRH: update.avgDailyRH, history: update.history };
                             }
                             return eng;
                         }));
@@ -420,7 +464,7 @@
                                                             {/* LOGIKA TAMPILAN OVERDUE */}
                                                             {pms.isOverdue ? (
                                                                 <span className={`text-sm font-black ${textColor} flex items-center animate-pulse`}>
-                                                                    <i className="fas fa-exclamation-triangle mr-1"></i> OVERDUE {Math.abs(pms.remaining).toFixed(0)} jam
+                                                                    <i className="fas fa-exclamation-triangle mr-1"></i> LEWAT {Math.abs(pms.remaining).toFixed(0)} jam
                                                                 </span>
                                                             ) : (
                                                                 <span className={`text-sm font-black ${textColor}`}>Sisa {pms.remaining.toFixed(0)} jam</span>
@@ -449,27 +493,54 @@
                                             )
                                         })}
 
-                                        {/* Grafik Jam Operasi (7 Hari Terakhir) */}
+                                        {/* Grafik Jam Operasi (7 Hari Terakhir) - Line Chart */}
                                         <div className="mt-6 pt-5 border-t border-slate-100">
                                             <h4 className="text-xs font-bold text-slate-700 mb-3 flex items-center">
-                                                <i className="fas fa-chart-bar mr-2 text-blue-500"></i> Jam Operasi Harian (7 Hari)
+                                                <i className="fas fa-chart-line mr-2 text-blue-500"></i> Trend Operasi Harian
                                             </h4>
-                                            <div className="flex gap-3 overflow-x-auto pb-2 custom-scrollbar snap-x">
-                                                {engine.history && engine.history.map((day, idx) => {
-                                                    const heightPct = Math.min(100, (day.runHours / 24) * 100);
-                                                    return (
-                                                        <div key={idx} className="flex flex-col items-center flex-shrink-0 w-10 snap-end">
-                                                            <span className="text-[10px] text-slate-600 font-bold mb-1">{day.runHours.toFixed(1)}</span>
-                                                            <div className="h-16 w-full bg-slate-100 rounded-t-md relative flex items-end overflow-hidden group">
-                                                                <div 
-                                                                    className="w-full bg-blue-500 hover:bg-blue-600 rounded-t-md transition-all duration-500" 
-                                                                    style={{ height: `${heightPct}%` }}
-                                                                ></div>
-                                                            </div>
-                                                            <span className="text-[9px] text-slate-500 mt-1 whitespace-nowrap">{day.date}</span>
-                                                        </div>
-                                                    )
-                                                })}
+                                            <div className="w-full h-40 bg-white rounded-lg p-2 border border-slate-200 shadow-inner">
+                                                <svg viewBox="0 0 280 120" className="w-full h-full overflow-visible">
+                                                    {/* Garis Grid Horizontal (0, 12, 24 jam) */}
+                                                    <line x1="20" y1="20" x2="260" y2="20" stroke="#f1f5f9" strokeWidth="1" />
+                                                    <text x="15" y="24" fontSize="8" fill="#94a3b8" textAnchor="end">24</text>
+                                                    
+                                                    <line x1="20" y1="50" x2="260" y2="50" stroke="#f1f5f9" strokeWidth="1" />
+                                                    <text x="15" y="54" fontSize="8" fill="#94a3b8" textAnchor="end">12</text>
+                                                    
+                                                    <line x1="20" y1="80" x2="260" y2="80" stroke="#cbd5e1" strokeWidth="1" strokeDasharray="2" />
+                                                    <text x="15" y="84" fontSize="8" fill="#94a3b8" textAnchor="end">0</text>
+                                                    
+                                                    {/* Garis Line Chart */}
+                                                    <polyline 
+                                                        fill="none" 
+                                                        stroke="#2563eb" 
+                                                        strokeWidth="2.5" 
+                                                        strokeLinecap="round"
+                                                        strokeLinejoin="round"
+                                                        points={engine.history && engine.history.map((day, idx) => {
+                                                            const x = 30 + (idx * 38);
+                                                            const y = 80 - ((day.runHours || 0) / 24) * 60;
+                                                            return `${x},${y}`;
+                                                        }).join(" ")} 
+                                                    />
+                                                    
+                                                    {/* Titik dan Label */}
+                                                    {engine.history && engine.history.map((day, idx) => {
+                                                        const x = 30 + (idx * 38);
+                                                        const y = 80 - ((day.runHours || 0) / 24) * 60;
+                                                        return (
+                                                            <g key={idx} className="group">
+                                                                <circle cx={x} cy={y} r="4" fill="#ffffff" stroke="#2563eb" strokeWidth="2" />
+                                                                <text x={x} y={y - 10} textAnchor="middle" fontSize="10" fill="#1e293b" fontWeight="bold">
+                                                                    {day.runHours > 0 ? day.runHours.toFixed(1) : '0'}
+                                                                </text>
+                                                                <text x={x} y="100" textAnchor="middle" fontSize="9" fill="#64748b">
+                                                                    {day.date}
+                                                                </text>
+                                                            </g>
+                                                        );
+                                                    })}
+                                                </svg>
                                             </div>
                                         </div>
                                     </div>
@@ -501,30 +572,47 @@
                     {/* Modal Input Daily RH */}
                     {showInputModal && (
                         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-                            <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden">
-                                <div className="bg-slate-800 px-6 py-4 flex justify-between items-center">
+                            <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col" style={{maxHeight: '90vh'}}>
+                                <div className="bg-slate-800 px-6 py-4 flex justify-between items-center shrink-0">
                                     <h3 className="text-white font-bold text-lg">Input RH Harian (Aktual)</h3>
                                     <button onClick={() => setShowInputModal(false)} className="text-slate-400 hover:text-white"><i className="fas fa-times"></i></button>
                                 </div>
-                                <form onSubmit={handleInputRH} className="p-6 space-y-4">
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">Tanggal</label>
-                                        <input type="date" name="inputDate" required defaultValue={new Date().toISOString().split('T')[0]} className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none" />
+                                <form onSubmit={handleInputRH} className="p-6 space-y-4 overflow-y-auto custom-scrollbar">
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Tanggal Input</label>
+                                        <input type="date" name="inputDate" required defaultValue={defaultDateStr} className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none" />
                                     </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">Pilih Engine</label>
-                                        <select name="engineId" className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none">
-                                            {engines.map(e => <option key={e.id} value={e.id}>{e.name} (RH: {e.currentRH.toFixed(1)})</option>)}
-                                        </select>
+                                    
+                                    <div className="space-y-3 pt-2 border-t">
+                                        <div className="flex text-xs font-bold text-slate-500 mb-2 px-1">
+                                            <div className="w-1/3">NAMA MESIN</div>
+                                            <div className="w-1/3 text-center">RH TERAKHIR</div>
+                                            <div className="w-1/3">INPUT RH BARU</div>
+                                        </div>
+                                        
+                                        {engines.map(engine => (
+                                            <div key={engine.id} className="flex items-center bg-slate-50 p-2 rounded-lg border border-slate-200">
+                                                <label className="w-1/3 text-sm font-bold text-slate-700">{engine.name}</label>
+                                                <div className="w-1/3 text-center text-sm font-mono text-slate-500">
+                                                    {engine.currentRH.toLocaleString('id-ID', {maximumFractionDigits:1})}
+                                                </div>
+                                                <div className="w-1/3">
+                                                    <input 
+                                                        type="number" 
+                                                        step="0.1" 
+                                                        name={`rh_${engine.id}`} 
+                                                        placeholder="Kosongkan jika off" 
+                                                        className="w-full border border-slate-300 rounded px-2 py-1.5 focus:ring-2 focus:ring-blue-500 outline-none text-sm font-bold text-blue-700 placeholder-slate-400" 
+                                                    />
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">RH Aktual Terbaru</label>
-                                        <input type="number" step="0.1" name="newRH" required className="w-full border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none" />
-                                    </div>
-                                    <div className="pt-4 flex justify-end space-x-3">
+                                    
+                                    <div className="pt-4 flex justify-end space-x-3 border-t mt-4">
                                         <button type="button" onClick={() => setShowInputModal(false)} className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg" disabled={isSaving}>Batal</button>
                                         <button type="submit" className="flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow" disabled={isSaving}>
-                                            {isSaving ? <span className="loader mr-2 w-4 h-4 border-2"></span> : "Simpan Data"}
+                                            {isSaving ? <span className="loader mr-2 w-4 h-4 border-2"></span> : "Simpan Batch Data"}
                                         </button>
                                     </div>
                                 </form>
@@ -543,7 +631,7 @@
                                 <form key={`setup-${setupEngineData.id}`} onSubmit={handleSetupEngine} className="p-6 space-y-4 overflow-y-auto custom-scrollbar">
                                     <div>
                                         <label className="block text-sm font-medium text-slate-700 mb-1">Tanggal Setup</label>
-                                        <input type="date" name="setupDate" required defaultValue={new Date().toISOString().split('T')[0]} className="w-full border border-slate-300 rounded-lg px-3 py-2 outline-none" />
+                                        <input type="date" name="setupDate" required defaultValue={defaultDateStr} className="w-full border border-slate-300 rounded-lg px-3 py-2 outline-none" />
                                     </div>
                                     <div>
                                         <label className="block text-sm font-medium text-slate-700 mb-1">Pilih Engine</label>
