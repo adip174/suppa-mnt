@@ -107,11 +107,18 @@
                                 d.setDate(d.getDate() - (7 - i)); // i=6 adalah Kemarin
                                 const dateStr = d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
                                 
-                                const existingLog = (eng.history || []).find(h => h.date === dateStr);
+                                const targetDay = d.getDate();
+
+                                // SMART MATCHING: Cari berdasarkan ekstraksi angka hari (untuk mengabaikan perbedaan format string & timezone GAS vs Browser)
+                                const existingLog = (eng.history || []).find(h => {
+                                    if (!h || !h.date) return false;
+                                    const match = h.date.match(/\d+/);
+                                    return match && parseInt(match[0], 10) === targetDay;
+                                });
                                 
                                 return {
                                     date: dateStr,
-                                    runHours: existingLog ? existingLog.runHours : 0 
+                                    runHours: existingLog ? Math.max(0, existingLog.runHours) : 0 
                                 };
                             });
                             
@@ -345,7 +352,9 @@
                     <header className="bg-slate-900 dark:bg-slate-950 text-white shadow-lg sticky top-0 z-10 transition-colors duration-200">
                         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
                             <div className="flex items-center space-x-3">
-                                <i className="fas fa-industry text-2xl text-blue-400"></i>
+                                {/* LOGO IMAGE - Diperbarui menggunakan logo.png */}
+                                <img src="logo.png" alt="Logo Suppa" className="h-10 w-auto object-contain" />
+                                
                                 <div>
                                     <div className="flex items-center space-x-2">
                                         <h1 className="text-xl font-bold leading-tight">SUPPA MAINTENANCE</h1>
